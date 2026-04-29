@@ -8,7 +8,7 @@ import h5py
 import tqdm
 import shutil
 import psutil
-import minimp3py
+#import minimp3py
 import tempfile
 
 from typing import List, NoReturn, Dict, Union
