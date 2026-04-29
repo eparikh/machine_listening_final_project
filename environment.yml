@@ -220,7 +220,7 @@ dependencies:
       - hyperframe==5.2.0
       - idna==2.10
       - jsonpickle==3.0.4
-      - minimp3py==0.2.3
+        #- minimp3py==0.2.3
       - munch==2.5.0
       - nltk==3.8.1
       - packaging==24.0

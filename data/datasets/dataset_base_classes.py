@@ -9,6 +9,7 @@ import tqdm
 import shutil
 import psutil
 import minimp3py
+import tempfile
 
 from typing import List, NoReturn, Dict, Union
 
@@ -345,7 +346,61 @@ class Subset(DatasetBaseClass):
     def __len__(self) -> int:
         return len(self.indices)
 
+
 def decode(array, path, max_length=32):
+    """
+    Decodes an array if uint8 representing an mp3 file
+    This is a replacement for the decode function using librosa since minimp3 package is not available.
+    author: Lai Ye
+    """
+    try:
+        data = array.tobytes()
+
+
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as f:
+            f.write(data)
+            tmp_path = f.name
+
+
+        try:
+            y, sr = librosa.load(tmp_path, sr=None, mono=False)
+            assert sr == 32000, f"Unexpected sample rate {sr}   {path}"
+
+
+            if y.ndim == 1:
+                waveform = y
+            else:
+                waveform = y[0]
+
+
+            max_samples = int(max_length * sr)
+            offset = 0
+            if len(waveform) > max_samples:
+                max_offset = max(len(waveform) - max_samples, 0) + 1
+                offset = torch.randint(max_offset, (1,)).item()
+
+
+            waveform = waveform[offset:offset + max_samples]
+            waveform = np.asarray(waveform, dtype=np.float32)
+
+
+        finally:
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+    except Exception as e:
+        print(path)
+        raise e
+
+
+    return waveform
+
+
+
+def decode_minimp3py(array, path, max_length=32):
     """
     decodes an array if uint8 representing an mp3 file
     :rtype: np.array
