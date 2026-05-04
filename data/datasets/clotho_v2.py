@@ -1,9 +1,12 @@
 import torch
+import torchaudio
 import pandas as pd
 import os
+import copy
+from pathlib import Path
 from sacred import Ingredient
 from utils.directories import directories, get_dataset_dir
-from data.datasets.dataset_base_classes import audio_dataset, DatasetBaseClass
+from data.datasets.dataset_base_classes import audio_dataset, ConcatDataset, DatasetBaseClass
 
 SPLITS = ['development', 'validation', 'evaluation']
 
@@ -25,7 +28,76 @@ def get_clotho_v2(split, folder_name, compress):
     splits = {'train': 'development', 'val': 'validation', 'test': 'evaluation'}
     assert split in list(splits.keys())
     ds = Clotho_v2Dataset(splits[split])
-    return ds
+
+    if split != "train":
+        return ds
+
+    # RIR augmentation
+    return ConcatDataset([
+        ds,
+        RIRAugmentationDataset(ds)
+    ])
+
+class RIRAugmentationDataset(DatasetBaseClass):
+    """
+    Author: Emil Parikh
+    """
+
+    def __init__(self, clotho_dataset):
+        super().__init__()
+        self.clotho_dataset = clotho_dataset
+
+        self.rir_paths = [path for path in Path('/scratch/ekp252/salsa/RIRS_NOISES/simulated_rirs').rglob('*.wav')]
+        print(f"Found {len(self.rir_paths)} RIR wav files...")
+
+        # Keep same size of Clotho audio
+        self.fft_convolve = torchaudio.transforms.FFTConvolve(mode="same")
+
+        # We have 16000 Hz samples in SLR28, so no need to check
+        print(f"Set to resample RIRs from 16000 to {clotho_dataset.sample_rate} Hz")
+        self.rir_resample = torchaudio.transforms.Resample(16000, clotho_dataset.sample_rate)
+
+    def __getattr__(self, name):
+        """
+        Get attributes from the Clotho Dataset class associated with this RIR class
+        """
+        return getattr(self.clotho_dataset, name)
+
+    def __get_audio_paths__(self):
+        return self.clotho_dataset.__get_audio_paths__()
+
+    def __getitem__(self, item):
+        """
+        The idea is
+        1. get the item (dict) from Clotho_v2Dataset, with the numpy samples in key "audio"
+        2. deep copy the dict
+        3. replace the audio with the augmented audio
+        """
+        clotho_item = self.clotho_dataset.__getitem__(item)
+        rir_item = copy.deepcopy(clotho_item)
+
+        # Get a random rir wav file
+        rir_idx = torch.randint(len(self.rir_paths), (1,)).item()
+        rir, _ = torchaudio.load(self.rir_paths[rir_idx])
+
+        # Resample to match Clotho audio
+        rir = self.rir_resample(rir)
+
+        # Normalize
+        rir = rir / torch.linalg.vector_norm(rir, ord=2)
+
+        # This is numpy, not torch
+        clotho_samples = rir_item["audio"]
+
+        augmented = self.fft_convolve(torch.from_numpy(clotho_samples).unsqueeze(0), rir)
+        rir_item["audio"] = augmented.squeeze().numpy()
+        return rir_item
+
+    def __len__(self):
+        return len(self.clotho_dataset)
+
+    def __str__(self):
+        return 'ClothoV2_RIRAugmentation'
 
 
 class Clotho_v2Dataset(DatasetBaseClass):
