@@ -69,7 +69,7 @@ def default_config():
         'adopt_layer_size': 2048,
         'segment_length': 10,
         'hop_length': 10,
-        'aggregate': 'mean',
+        'aggregate': 'weighted_single',
         'sequence_model': {
             'num_layers': 0,
             'dim': 768, # 3840
@@ -429,18 +429,28 @@ class AudioRetrievalModel(pl.LightningModule, ABC):
         self.experiment_name = 'none'
         self.store_predictions = True
 
-        D = audio_output_size
-        self.audio_cross_token = torch.nn.Parameter(
-            torch.randn(1, 1, D) * 0.04
-        )
-        self.audio_cross_attn = torch.nn.MultiheadAttention(
-            embed_dim=D,
-            num_heads=8,
-            batch_first=True
-        )
-
-        self.audio_gate = torch.nn.Linear(D, 1)  # [D, D]?
-        torch.nn.init.constant_(self.audio_gate.bias, -3.0)
+        audio_features_aggr = self.kwargs['audio_features']['aggregate']
+        print(audio_features_aggr)
+        if audio_features_aggr.startswith('weighted'):
+            D = audio_output_size
+            self.audio_cross_token = torch.nn.Parameter(
+                torch.randn(1, 1, D) * 0.04
+            )
+            self.audio_cross_attn = torch.nn.MultiheadAttention(
+                embed_dim=D,
+                num_heads=8,
+                batch_first=True
+            )
+            if audio_features_aggr == 'weighted_single':
+                print("DEBUG: weighted_single branch", flush=True)
+                self.audio_gate = torch.nn.Linear(D, 1) 
+            elif audio_features_aggr == 'weighted_multi':
+                print("DEBUG: weighted_multi branch", flush=True)
+                self.audio_gate = torch.nn.Linear(D, D)
+            else:
+                raise ValueError(f"Unknown audio aggregation method: {audio_features_aggr}")
+            torch.nn.init.zeros_(self.audio_gate.weight)
+            torch.nn.init.constant_(self.audio_gate.bias, -3.0)
 
     def forward_audio(self, batch, y=None, y_mask=None):
 
@@ -526,47 +536,49 @@ class AudioRetrievalModel(pl.LightningModule, ABC):
 
         # start from commenting out mean aggregation
 
-        # if self.kwargs['audio_features']['aggregate'] == 'mean':
-        #     # average, get the embeddings
-        #     num_unmasked = audio_features_mask[:, :, None].sum(1)
-        #     audio_features = (audio_features * audio_features_mask[:, :, None]).sum(1) / num_unmasked
+        if self.kwargs['audio_features']['aggregate'] == 'mean':
+            # average, get the embeddings
+            num_unmasked = audio_features_mask[:, :, None].sum(1)
+            audio_features = (audio_features * audio_features_mask[:, :, None]).sum(1) / num_unmasked
 
-        #     batch['audio_features'] = audio_features[:, None, :]
-        #     batch['audio_features_mask'] = audio_features_mask[:, :1]
-        # else:
-        #     batch['audio_features'] = audio_features
-        #     batch['audio_features_mask'] = audio_features_mask
+            batch['audio_features'] = audio_features[:, None, :]
+            batch['audio_features_mask'] = audio_features_mask[:, :1]
 
-        mask = audio_features_mask[:, :, None]  # [B, L, 1]
+        elif self.kwargs['audio_features']['aggregate'].startswith('weighted'):
+            mask = audio_features_mask[:, :, None]  # [B, L, 1]
 
-        mean_repr = (audio_features * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
-        mean_repr = mean_repr[:, None, :]       # [B, 1, D]
+            mean_repr = (audio_features * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
+            mean_repr = mean_repr[:, None, :]       # [B, 1, D]
 
-        query = self.audio_cross_token.expand(audio_features.shape[0], -1, -1)
+            query = self.audio_cross_token.expand(audio_features.shape[0], -1, -1)
 
-        attn_repr, attn_weight = self.audio_cross_attn(
-            query=query,  #[1, D]
-            key=audio_features,  #[L, D],  QK' = [1, L],  
-            value=audio_features,
-            key_padding_mask=(audio_features_mask == 0),
-            need_weights=False
-        )
-        # attn_repr: [B, 1, D]
+            attn_repr, attn_weight = self.audio_cross_attn(
+                query=query,  #[1, D]
+                key=audio_features,  #[L, D],  QK' = [1, L],  
+                value=audio_features,
+                key_padding_mask=(audio_features_mask == 0),
+                need_weights=False
+            )
+            # attn_repr: [B, 1, D]
 
-        gate = torch.sigmoid(self.audio_gate(mean_repr))  # [B, 1, 1]
+            gate = torch.sigmoid(self.audio_gate(mean_repr))  # [B, 1, 1] for single-gate, [B, 1, D] for multi-gate
 
-        # record
-        batch['audio_gate_value'] = gate.detach()
+            # record
+            batch['audio_gate_value'] = gate.detach()
 
-        audio_features = gate * attn_repr + (1 - gate) * mean_repr
-        audio_features_mask = torch.ones(
-            audio_features.shape[:2],
-            dtype=audio_features_mask.dtype,
-            device=audio_features_mask.device
-        )
+            audio_features = gate * attn_repr + (1 - gate) * mean_repr
+            audio_features_mask = torch.ones(
+                audio_features.shape[:2],
+                dtype=audio_features_mask.dtype,
+                device=audio_features_mask.device
+            )
 
-        batch['audio_features'] = audio_features
-        batch['audio_features_mask'] = audio_features_mask
+            batch['audio_features'] = audio_features
+            batch['audio_features_mask'] = audio_features_mask
+
+        else:
+            batch['audio_features'] = audio_features
+            batch['audio_features_mask'] = audio_features_mask
 
         batch['audio_features'] = torch.nn.functional.dropout(batch['audio_features'], p=self.kwargs['projection_dropout'], training=self.training)
         batch['audio_features'] = self.project_audio(batch['audio_features'])
