@@ -2,7 +2,7 @@
 
 **Emil Parikh, Liam Wintz, Lai Ye**
 
-This repository contains our implementation of modifications to the [Primus SALSA baseline](https://github.com/OptimusPrimus/salsa) for DCASE 2024 Task 8: Language-Based Audio Retrieval. Given a natural language text query, the system retrieves and ranks 10 audio clips from the ClothoV2 dataset by similarity to the query.
+This repository contains our implementation of modifications to the [Primus SALSA baseline](https://github.com/OptimusPrimus/salsa) for [DCASE 2024 Task 8: Language-Based Audio Retrieval](https://dcase.community/challenge2024/task-language-based-audio-retrieval). Given a natural language text query, the system retrieves and ranks 10 audio clips from the ClothoV2 dataset by similarity to the query.
 
 Our modifications include a **post-PaSST gated cross-attention aggregation** module and a **Room Impulse Response (RIR) data augmentation** pipeline, both described in the accompanying report.
 
@@ -55,7 +55,7 @@ The key architectural change is in `forward_audio`. The default Primus implement
 - The bias is initialized to `-3.0` so mean pooling dominates early in training (`g ≈ 0.047`)
 - Activated via config: `audio_features.aggregate=weighted_single`
 
-### 2. RIR Data Augmentation (`data/datasets/wrapper.py`)
+### 2. RIR Data Augmentation (`data/datasets/clotho_v2.py`)
 
 An augmentation class that convolves ClothoV2 clips with random Room Impulse Responses from the [OpenSLR SLR28](https://www.openslr.org/28/) dataset (60,000 simulated small/medium/large room RIRs). During training the augmented dataset is concatenated with the original ClothoV2, doubling the training set size.
 
