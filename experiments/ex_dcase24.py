@@ -1,4 +1,4 @@
-import csv
+# import csv
 import os
 from abc import ABC
 import math
@@ -69,7 +69,7 @@ def default_config():
         'adopt_layer_size': 2048,
         'segment_length': 10,
         'hop_length': 10,
-        'aggregate': 'mean',
+        'aggregate': 'weighted_single',
         'sequence_model': {
             'num_layers': 0,
             'dim': 768, # 3840
@@ -255,28 +255,54 @@ def get_data_set(data_set_id, mode, _config):
 
 @audio_retrieval.capture
 def get_model(load_parameters, _config):
+    print("DEBUG get_model: before fresh AudioRetrievalModel", flush=True)
     ac = AudioRetrievalModel(**_config)
+    print("DEBUG get_model: after fresh AudioRetrievalModel", flush=True)
+
 
     # init parameters from pre-trained model
     if load_parameters:
-        print(f'Loading model {load_parameters} ...')
+        # print(f'Loading model {load_parameters} ...')
+        print(f'DEBUG get_model: Loading model {load_parameters} ...', flush=True)
         save_dir = os.path.join(get_model_dir(), load_parameters)
+        print("DEBUG get_model: save_dir =", save_dir, flush=True)
         assert os.path.exists(save_dir)
         if _config['load_last'] == 'last':
             print('Loading last checkpoint.')
             model_path = list(glob(os.path.join(save_dir, 'last.ckpt')))[-1]
         elif _config['load_last'] == 'best':
-            print('Loading best checkpoint.')
+            print('DEBUG get_model: Loading best checkpoint.', flush=True)
+
+            print("DEBUG get_model: before glob", flush=True)
             paths = glob(os.path.join(save_dir, 'epoch_*.ckpt'))
+            print("DEBUG get_model: after glob; paths =", paths, flush=True)
+
+            print("DEBUG get_model: before sort", flush=True)
             paths.sort(key=lambda x: float(os.path.basename(x).split('-')[-1].split('.')[1]))
+            print("DEBUG get_model: after sort", flush=True)
+
             model_path = paths[-1]
         else:
             raise AttributeError(_config['load_last'])
-        print(model_path)
-        ac_ = AudioRetrievalModel.load_from_checkpoint(model_path)
-        print('Loading state dict')
-        missing_keys = ac.load_state_dict(ac_.state_dict())
-        print(missing_keys)
+        print("DEBUG get_model: model_path =", model_path, flush=True)
+
+        print("DEBUG get_model: before torch.load checkpoint", flush=True)
+        ckpt = torch.load(model_path, map_location="cpu")
+        print("DEBUG get_model: after torch.load checkpoint", flush=True)
+
+        state_dict = ckpt["state_dict"]
+
+        print("DEBUG state_dict type:", type(state_dict), flush=True)
+        print("DEBUG num keys:", len(state_dict), flush=True)
+        print("DEBUG first 10 keys:", list(state_dict.keys())[:10], flush=True)
+
+        print("DEBUG get_model: before ac.load_state_dict", flush=True)
+        missing_keys = ac.load_state_dict(state_dict, strict=True)
+        print("DEBUG get_model: after ac.load_state_dict", flush=True)
+        print(missing_keys, flush=True)
+
+        del ckpt
+        del state_dict
 
     return ac
 
@@ -295,6 +321,7 @@ class AudioRetrievalModel(pl.LightningModule, ABC):
         self.kwargs = kwargs
         self.distributed_mode = kwargs.get('num_nodes', 1) > 1
 
+        print("DEBUG: AudioRetrievalModel init: before audio model", flush=True)
         from models.audio.base import get_audio_embedding_model
         self.audio_embedding_model, audio_output_size = get_audio_embedding_model(
             self.kwargs['audio_features']['model'],
@@ -303,9 +330,12 @@ class AudioRetrievalModel(pl.LightningModule, ABC):
             model_config=self.kwargs['audio_features']['model_config'],
             multi_window=self.kwargs['audio_features']['use_local_model']
         )
+        print("DEBUG: AudioRetrievalModel init: after audio model", flush=True)
+        print("DEBUG: AudioRetrievalModel init: before sentence model", flush=True)
 
         from models.text.sentence_embedding_models import get_sentence_embedding_model
         self.sentence_embedding_model, self.tokenizer, text_output_size = get_sentence_embedding_model(self.kwargs['sentence_features']['model'])
+        print("DEBUG: AudioRetrievalModel init: after sentence model", flush=True)
 
         layer_sizes = [self.kwargs['audio_features']['sequence_model']['dim'] if self.kwargs['audio_features']['sequence_model']['num_layers'] > 0 else audio_output_size]
         layer_sizes += [self.kwargs['audio_features']['adopt_layer_size']] * self.kwargs['audio_features']['adopt_n_layers']
@@ -399,6 +429,29 @@ class AudioRetrievalModel(pl.LightningModule, ABC):
         self.experiment_name = 'none'
         self.store_predictions = True
 
+        audio_features_aggr = self.kwargs['audio_features']['aggregate']
+        print(audio_features_aggr)
+        if audio_features_aggr.startswith('weighted'):
+            D = audio_output_size
+            self.audio_cross_token = torch.nn.Parameter(
+                torch.randn(1, 1, D) * 0.04
+            )
+            self.audio_cross_attn = torch.nn.MultiheadAttention(
+                embed_dim=D,
+                num_heads=8,
+                batch_first=True
+            )
+            if audio_features_aggr == 'weighted_single':
+                print("DEBUG: weighted_single branch", flush=True)
+                self.audio_gate = torch.nn.Linear(D, 1) 
+            elif audio_features_aggr == 'weighted_multi':
+                print("DEBUG: weighted_multi branch", flush=True)
+                self.audio_gate = torch.nn.Linear(D, D)
+            else:
+                raise ValueError(f"Unknown audio aggregation method: {audio_features_aggr}")
+            torch.nn.init.zeros_(self.audio_gate.weight)
+            torch.nn.init.constant_(self.audio_gate.bias, -3.0)
+
     def forward_audio(self, batch, y=None, y_mask=None):
 
         device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
@@ -423,7 +476,7 @@ class AudioRetrievalModel(pl.LightningModule, ABC):
         audio_features_mask = batch['audio_features_mask']
 
         # combine embeddings of the individual snippets
-        if self.kwargs['audio_features']['sequence_model']['num_layers'] > 0:
+        if self.kwargs['audio_features']['sequence_model']['num_layers'] > 0: #skipped
             if self.kwargs['audio_features']['sequence_model'].get('reduce_sequence', 0) > 0:
                 B, L, D = audio_features.shape
                 N = self.kwargs['audio_features']['sequence_model']['reduce_sequence']
@@ -481,6 +534,8 @@ class AudioRetrievalModel(pl.LightningModule, ABC):
                 audio_features = audio_features[:, :, :]
                 audio_features_mask = audio_features_mask[:, :]
 
+        # start from commenting out mean aggregation
+
         if self.kwargs['audio_features']['aggregate'] == 'mean':
             # average, get the embeddings
             num_unmasked = audio_features_mask[:, :, None].sum(1)
@@ -488,11 +543,44 @@ class AudioRetrievalModel(pl.LightningModule, ABC):
 
             batch['audio_features'] = audio_features[:, None, :]
             batch['audio_features_mask'] = audio_features_mask[:, :1]
+
+        elif self.kwargs['audio_features']['aggregate'].startswith('weighted'):
+            mask = audio_features_mask[:, :, None]  # [B, L, 1]
+
+            mean_repr = (audio_features * mask).sum(dim=1) / mask.sum(dim=1).clamp_min(1.0)
+            mean_repr = mean_repr[:, None, :]       # [B, 1, D]
+
+            query = self.audio_cross_token.expand(audio_features.shape[0], -1, -1)
+
+            attn_repr, attn_weight = self.audio_cross_attn(
+                query=query,  #[1, D]
+                key=audio_features,  #[L, D],  QK' = [1, L],  
+                value=audio_features,
+                key_padding_mask=(audio_features_mask == 0),
+                need_weights=False
+            )
+            # attn_repr: [B, 1, D]
+
+            gate = torch.sigmoid(self.audio_gate(mean_repr))  # [B, 1, 1] for single-gate, [B, 1, D] for multi-gate
+
+            # record
+            batch['audio_gate_value'] = gate.detach()
+
+            audio_features = gate * attn_repr + (1 - gate) * mean_repr
+            audio_features_mask = torch.ones(
+                audio_features.shape[:2],
+                dtype=audio_features_mask.dtype,
+                device=audio_features_mask.device
+            )
+
+            batch['audio_features'] = audio_features
+            batch['audio_features_mask'] = audio_features_mask
+
         else:
             batch['audio_features'] = audio_features
             batch['audio_features_mask'] = audio_features_mask
 
-        batch['audio_features'] = torch.nn.functional.dropout(batch['audio_features'], p=self.kwargs['projection_dropout'])
+        batch['audio_features'] = torch.nn.functional.dropout(batch['audio_features'], p=self.kwargs['projection_dropout'], training=self.training)
         batch['audio_features'] = self.project_audio(batch['audio_features'])
 
         return batch
@@ -579,6 +667,26 @@ class AudioRetrievalModel(pl.LightningModule, ABC):
         self.update_scalars(batch_idx)
 
         audio_features, sentence_features, audio_mask, sentence_mask = self(batch)
+
+        # log gate values
+        if "audio_gate_value" in batch:
+            self.log(
+                "train/audio_gate_mean",
+                batch["audio_gate_value"].mean(),
+                sync_dist=True,
+                prog_bar=True
+            )
+            self.log(
+                "train/audio_gate_min",
+                batch["audio_gate_value"].min(),
+                sync_dist=True
+            )
+            self.log(
+                "train/audio_gate_max",
+                batch["audio_gate_value"].max(),
+                sync_dist=True
+            )
+
         paths = np.array([hash(p) for p in batch['path']])
 
         if self.distributed_mode:
@@ -846,12 +954,21 @@ class AudioRetrievalModel(pl.LightningModule, ABC):
                 text_encoder.append(p)
             elif 'project_sentence' in k or 'project_metadata' in k:
                 text_seq.append(p)
-            elif 'project_audio' in k or 'audio_output_projection' in k or 'posencode' in k or 'audio_sequence' in k or 'audio_token' in k:
+            elif (
+                'project_audio' in k
+                or 'audio_output_projection' in k
+                or 'posencode' in k
+                or 'audio_sequence' in k
+                or 'audio_token' in k
+                or 'audio_cross_token' in k
+                or 'audio_cross_attn' in k
+                or 'audio_gate' in k
+            ):
                 audio_seq.append(p)
             elif 'tau' in k or 'timing_tau' in k:
                 audio_seq.append(p)
             else:
-                raise ValueError
+                raise ValueError(f"Unassigned parameter in configure_optimizers: {k}")
 
         param_groups = [
             {"params": audio_encoder, "lr": self.kwargs['lr_audio_encoder']},
@@ -861,9 +978,7 @@ class AudioRetrievalModel(pl.LightningModule, ABC):
         ]
 
         optimizer = get_optimizer(param_groups)
-        return {
-            "optimizer": optimizer
-        }
+        return {"optimizer": optimizer}
 
     @audio_retrieval.capture
     def update_scalars(self, batch_idx, hard_steps=True):
@@ -1012,9 +1127,29 @@ def print_lr(max_epochs):
 
 @audio_retrieval.command
 def cmd_generate_embeddings(model=None, load_parameters=None, train_on=None):
+    print("DEBUG: entering cmd_generate_embeddings", flush=True)
+    print("DEBUG: load_parameters =", load_parameters, flush=True)
+    print("DEBUG: train_on =", train_on, flush=True)
     if model is None:
+        print("DEBUG: before get_model", flush=True)
         model = get_model(load_parameters)
+        print("DEBUG: after get_model", flush=True)
+    print("DEBUG: before cuda", flush=True)
+    print("DEBUG: CUDA_VISIBLE_DEVICES =", os.environ.get("CUDA_VISIBLE_DEVICES"), flush=True)
+    print("DEBUG: torch.cuda.is_available() =", torch.cuda.is_available(), flush=True)
+    print("DEBUG: torch.cuda.device_count() =", torch.cuda.device_count(), flush=True)
+
+    if torch.cuda.is_available():
+        print("DEBUG: current device =", torch.cuda.current_device(), flush=True)
+        print("DEBUG: device name =", torch.cuda.get_device_name(0), flush=True)
+
+    print("DEBUG: before torch.cuda.init", flush=True)
+    torch.cuda.init()
+    print("DEBUG: after torch.cuda.init", flush=True)
+
+    print("DEBUG: before model.cuda", flush=True)
     model = model.cuda()
+    print("DEBUG: after model.cuda", flush=True)
     model.eval()
 
     # create the data module
