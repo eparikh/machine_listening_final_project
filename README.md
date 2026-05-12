@@ -26,7 +26,7 @@ Our modifications include a **post-PaSST gated cross-attention aggregation** mod
 ├── models/
 │   ├── audio/
 │   │   ├── passt.py           # PaSST audio encoder wrapper
-│   │   ├── base.py            # Splits long audio into 10s windwos
+│   │   ├── base.py            # Splits long audio into 10s windows
 │   └── text/
 │       └── sentence_embedding_models.py  # RoBERTa-large text encoder wrapper
 │
