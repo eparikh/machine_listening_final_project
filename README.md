@@ -15,7 +15,7 @@ Our modifications include a **post-PaSST gated cross-attention aggregation** mod
 ├── experiments/
 │   └── ex_dcase24.py          # Main experiment file — model definition, training loop,
 │                              # loss, evaluation, etc. Gated cross-attention is
-│                              # implement over here.
+│                              # implemented over here.
 │
 ├── data/
 │   ├── data_loader.py
