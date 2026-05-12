@@ -18,7 +18,7 @@ Our modifications include a **post-PaSST gated cross-attention aggregation** mod
 │                              # implement over here.
 │
 ├── data/
-│   ├── data_loader.py         # PyTorch Lightning data module and collation logic
+│   ├── data_loader.py
 │   └── datasets/
 │       ├── clotho_v2.py       # ClothoV2 dataset — primary training/eval dataset
 │       └── wrapper.py         # Dataset wrappers. RIR implement in here.
