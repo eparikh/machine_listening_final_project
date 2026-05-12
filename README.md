@@ -21,7 +21,7 @@ Our modifications include a **post-PaSST gated cross-attention aggregation** mod
 │   ├── data_loader.py
 │   └── datasets/
 │       ├── clotho_v2.py       # ClothoV2 dataset — primary training/eval dataset
-│       └── wrapper.py         # Dataset wrappers. RIR implement in here.
+│       └── wrapper.py         # Dataset wrappers. RIR implemented in here.
 │
 ├── models/
 │   ├── audio/
